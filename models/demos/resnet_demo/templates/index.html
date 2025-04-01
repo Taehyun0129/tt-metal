@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>ResNet - 3200 Cycle Demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: black;
+      color: white;
+      font-family: sans-serif;
+      height: 100%;
+      display: flex;
+      flex-direction: row;
+    }
+
+    #sidebar {
+      width: 300px;
+      min-width: 200px;
+      max-width: 400px;
+      background: #111;
+      padding: 20px;
+      flex-shrink: 0;
+    }
+
+    #sidebar h2 {
+      margin-top: 0;
+      font-size: 20px;
+    }
+
+    #canvas {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000;
+    }
+
+    @media (max-width: 600px) {
+      body {
+        flex-direction: column;
+      }
+
+      #sidebar {
+        width: 100%;
+        max-width: none;
+      }
+
+      #canvas {
+        height: 80vh;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="sidebar">
+    <h2>ResNet Stats</h2>
+    <p><b>Total Images:</b> <span id="total">0</span></p>
+    <p><b>Accuracy:</b> <span id="accuracy">0</span>%</p>
+    <p><b>FPS:</b> <span id="fps">0</span></p>
+    <p>(Final results remain until next cycle's final message arrives)</p>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const imagePaths = {{ image_paths | tojson }};
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = window.innerWidth - 250;
+    canvas.height = window.innerHeight;
+
+    const cols = 8;
+    const rows = 4;
+    const cellW = canvas.width / cols;
+    const cellH = canvas.height / rows;
+
+
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = canvas.width;
+    offscreenCanvas.height = canvas.height;
+    const offCtx = offscreenCanvas.getContext("2d");
+
+    let currentCycle = null;
+    let latestResults = null;
+
+
+    let resultImageCache = {};
+
+
+    function getResultImage(path, callback) {
+      if (resultImageCache[path]) {
+        const cachedImg = resultImageCache[path];
+        if (cachedImg.complete) {
+          callback(cachedImg);
+        } else {
+          cachedImg.onload = () => callback(cachedImg);
+        }
+      } else {
+        const img = new Image();
+        img.src = "/val_images/" + path;
+        img.onload = () => {
+          resultImageCache[path] = img;
+          callback(img);
+        };
+        img.onerror = () => {
+          callback(null);
+        };
+        resultImageCache[path] = img;
+      }
+    }
+
+
+    function drawGrid(results) {
+      offCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+      let loadedCount = 0;
+      const totalImages = results.length;
+
+      results.forEach((r, i) => {
+        getResultImage(r.path, (img) => {
+          const col = i % cols;
+          const row = Math.floor(i / cols);
+          const x = col * cellW;
+          const y = row * cellH;
+
+          if (img) {
+            offCtx.drawImage(img, x, y, cellW, cellH);
+          } else {
+            offCtx.fillStyle = "gray";
+            offCtx.fillRect(x, y, cellW, cellH);
+          }
+          offCtx.strokeStyle = r.correct ? 'lime' : 'red';
+          offCtx.lineWidth = 2;
+          offCtx.strokeRect(x, y, cellW, cellH);
+          offCtx.fillStyle = 'white';
+          offCtx.font = '12px sans-serif';
+          offCtx.fillText(r.pred_label || "No Label", x + 5, y + 15);
+
+          loadedCount++;
+          if (loadedCount === totalImages) {
+            ctx.drawImage(offscreenCanvas, 0, 0);
+          }
+        });
+      });
+    }
+
+    function updateCanvas() {
+      if (latestResults) {
+        drawGrid(latestResults);
+      }
+      requestAnimationFrame(updateCanvas);
+    }
+
+    async function waitReady() {
+      while (true) {
+        try {
+          const resp = await fetch("/ready");
+          const { ready } = await resp.json();
+          if (ready) return;
+        } catch (e) {
+          console.error("Error checking ready status:", e);
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    (async function main() {
+      await waitReady();
+      console.log("Ready. Opening WebSocket...");
+      updateCanvas();
+
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => console.log("WebSocket connected.");
+
+      ws.onmessage = (evt) => {
+        const data = JSON.parse(evt.data);
+
+
+        if (data.final && data.cycle !== currentCycle) {
+          document.getElementById("total").innerText = data.stats.total || 0;
+          document.getElementById("accuracy").innerText = data.stats.accuracy || 0;
+          document.getElementById("fps").innerText = data.stats.fps || 0;
+
+          if (Array.isArray(data.results) && data.results.length > 0) {
+            latestResults = data.results;
+          } else {
+            console.warn("Skipping update - results empty or invalid");
+          }
+
+          currentCycle = data.cycle;
+        }
+      };
+
+      ws.onclose = () => console.log("WebSocket closed.");
+      ws.onerror = (error) => console.error("WebSocket error:", error);
+    })();
+  </script>
+</body>
+
+</html>
